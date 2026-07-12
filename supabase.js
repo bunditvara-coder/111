@@ -1,7 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import * as XLSX from "xlsx";
 import { subjectLabel, fmtTime, fmtDay } from "./data";
-
 const URL = import.meta.env.VITE_SUPABASE_URL;
 const KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
 export const configured = Boolean(URL && KEY);
@@ -49,6 +48,31 @@ export async function saveNote(sessionId, studentId, note) {
 async function sessionPresence(subjectId) {
   return (await rpc("session_presence", { p_subject_id: subjectId, p_teacher_key: teacherKey })) || [];
 }
+export async function deleteSession(sessionId) {
+  // best-effort: ลบรูปใน storage ของคาบนี้ก่อน
+  try {
+    const { data: files } = await supabase.storage.from("selfies").list(sessionId);
+    if (files && files.length) {
+      await supabase.storage.from("selfies").remove(files.map((f) => `${sessionId}/${f.name}`));
+    }
+  } catch (e) { /* ไม่เป็นไร ข้ามได้ */ }
+  await rpc("delete_session", { p_session_id: sessionId, p_teacher_key: teacherKey });
+}
+
+// ---------- รายชื่อนักเรียน (เก็บใน DB) ----------
+export async function getRoster(subjectId) {
+  const rows = (await rpc("list_students", { p_subject_id: subjectId })) || [];
+  return rows.map((r) => {
+    const title = r.title || "", first = r.first || "", last = r.last || "";
+    return { id: r.student_id, title, first, last, name: `${title}${first}${last ? " " + last : ""}`.trim() };
+  }).sort((a, b) => a.id.localeCompare(b.id));
+}
+export async function addStudent(subjectId, id, title, first, last) {
+  await rpc("add_student", { p_subject_id: subjectId, p_student_id: id, p_title: title, p_first: first, p_last: last, p_teacher_key: teacherKey });
+}
+export async function removeStudent(subjectId, id) {
+  await rpc("remove_student", { p_subject_id: subjectId, p_student_id: id, p_teacher_key: teacherKey });
+}
 
 // ---------- นักเรียน ----------
 export async function activeSession(subjectId) {
@@ -71,18 +95,19 @@ export async function submitCheckin({ sessionId, studentId, title, first, last, 
 
 // ---------- Excel ----------
 export async function exportSessionXlsx(subject, session) {
+  const roster = await getRoster(subject.id);
   const checkins = await listCheckins(session.id);
   const aoa = [
     [`${subjectLabel(subject)} — ครั้งที่ ${session.no}`],
     [`วันที่ ${fmtTime(session.createdAt)}`], [],
     ["ลำดับ", "รหัสนักศึกษา", "คำนำหน้า", "ชื่อ", "นามสกุล", "ชื่อเล่น", "สถานะ", "เวลาเช็คชื่อ", "หมายเหตุ"],
   ];
-  subject.roster.forEach((stu, i) => {
+  roster.forEach((stu, i) => {
     const c = checkins[stu.id];
     aoa.push([i + 1, stu.id, stu.title, stu.first, stu.last, c?.nickname || "", c ? "มาเรียน" : "ขาด", c ? fmtTime(c.atISO) : "", c?.note || ""]);
   });
   const present = Object.keys(checkins).length;
-  aoa.push([], ["", "", "", "", "", "มาเรียน", present, `ขาด ${subject.roster.length - present}`, `จาก ${subject.roster.length} คน`]);
+  aoa.push([], ["", "", "", "", "", "มาเรียน", present, `ขาด ${roster.length - present}`, `จาก ${roster.length} คน`]);
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   ws["!cols"] = [{ wch: 6 }, { wch: 14 }, { wch: 9 }, { wch: 16 }, { wch: 18 }, { wch: 12 }, { wch: 9 }, { wch: 18 }, { wch: 20 }];
   const wb = XLSX.utils.book_new();
@@ -91,6 +116,7 @@ export async function exportSessionXlsx(subject, session) {
 }
 
 export async function exportSummaryXlsx(subject) {
+  const roster = await getRoster(subject.id);
   const rows = await sessionPresence(subject.id);
   const sessMap = new Map();
   const presence = {};
@@ -101,7 +127,7 @@ export async function exportSummaryXlsx(subject) {
   const sessions = [...sessMap.entries()].map(([id, v]) => ({ id, ...v })).sort((a, b) => a.no - b.no);
   const head = ["ลำดับ", "รหัสนักศึกษา", "ชื่อ-นามสกุล", ...sessions.map((s) => `ครั้งที่ ${s.no} (${fmtDay(s.createdAt)})`), "รวมมา", "รวมขาด"];
   const aoa = [[`สรุปการเข้าเรียน — ${subjectLabel(subject)}`], [`ทั้งหมด ${sessions.length} ครั้ง`], [], head];
-  subject.roster.forEach((stu, i) => {
+  roster.forEach((stu, i) => {
     let pc = 0;
     const cells = sessions.map((s) => { const ok = presence[s.id]?.has(stu.id); if (ok) pc++; return ok ? "/" : "-"; });
     aoa.push([i + 1, stu.id, stu.name, ...cells, pc, sessions.length - pc]);

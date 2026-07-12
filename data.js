@@ -55,7 +55,7 @@ const R_COSTUME = [
   ["67126616101", "นางสาวธัญชนก บัวดัง"],
 ];
 
-function parseName(name) {
+export function parseName(name) {
   const n = name.trim().replace(/\s+/g, " ");
   let title = "", rest = n;
   if (n.startsWith("นางสาว")) { title = "นางสาว"; rest = n.slice(6).trim(); }
